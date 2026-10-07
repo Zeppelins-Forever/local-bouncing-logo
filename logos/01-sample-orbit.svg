@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <!-- Sample logo (fictional) for testing. Deliberately has empty margins: the page crops them away. -->
+  <defs>
+    <linearGradient id="planet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2fd3c4"/>
+      <stop offset="1" stop-color="#1373b8"/>
+    </linearGradient>
+  </defs>
+  <circle cx="200" cy="165" r="78" fill="url(#planet)"/>
+  <ellipse cx="200" cy="165" rx="128" ry="38" fill="none" stroke="#ffb02e" stroke-width="12"
+           transform="rotate(-18 200 165)"/>
+  <circle cx="318" cy="128" r="15" fill="#ff5a5f"/>
+  <text x="200" y="305" text-anchor="middle" fill="#eef3f7" font-family="Helvetica, Arial, sans-serif"
+        font-size="40" font-weight="700" letter-spacing="10">SAMPLE</text>
+</svg>

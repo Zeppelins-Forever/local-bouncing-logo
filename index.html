@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Bouncing logo</title>
+<link rel="icon" href="data:,">
+<!--
+  BOUNCING LOGO
+
+  Folder layout (names are fixed):
+      index.html     this page
+      config.ini     optional settings and per-logo rules (every option and its default is listed there)
+      logos/         every .svg / .png / .webp in here is used automatically
+
+  Serve the folder with any web server that lists folders, e.g.  python3 -m http.server 8000
+  and open http://localhost:8000/
+
+  Keyboard:  +  add a logo           -  remove a logo          s  toggle "all the same"
+             1-5  one frame for all (1 none, 2 glow, 3 double, 4 brackets, 5 pill)
+             r  cycle recolour (auto, on, match, off)      0  back to config.ini
+-->
+<style>
+  html, body { margin: 0; width: 100vw; height: 100vh; height: 100dvh; overflow: hidden; background: #111; }
+  * { cursor: none; -webkit-user-select: none; user-select: none; }
+
+  /* One logo = .logo (frame) > .art (the visible artwork, cropped) > .pic (the whole image file).
+     JS sets width/height, data-frame, data-recolor and the variables
+     --c (frame colour), --c-soft (glow colour), --fill (logo colour), --pad, --bw, --img. */
+  .logo {
+    position: absolute; left: 0; top: 0; box-sizing: border-box;
+    will-change: transform; pointer-events: none;
+  }
+  .logo .art { position: relative; width: 100%; height: 100%; overflow: hidden; }
+  .logo .pic { position: absolute; background: var(--img) 0 0 / 100% 100% no-repeat; }
+  .logo.gone { opacity: 0; transition: opacity .35s; }
+
+  /* ---- recolour: the artwork's shape filled with one colour ---- */
+  .logo:not([data-recolor="off"]) .pic {
+    background: var(--fill);
+    -webkit-mask: var(--img) 0 0 / 100% 100% no-repeat;
+            mask: var(--img) 0 0 / 100% 100% no-repeat;
+  }
+
+  /* ---- frames (--glow on <body> is the `glow` setting) ---- */
+  .logo[data-frame="glow"] {
+    padding: var(--pad); border: var(--bw) solid var(--c); border-radius: calc(var(--pad) * 1.1);
+    box-shadow: 0 0 calc(var(--pad) * 2.2 * var(--glow)) var(--c-soft),
+                inset 0 0 calc(var(--pad) * 2.2 * var(--glow)) var(--c-soft);
+  }
+  .logo[data-frame="double"] {
+    padding: var(--pad); border: calc(var(--bw) * 1.6) solid var(--c); border-radius: calc(var(--pad) * .35);
+    box-shadow: inset 0 0 0 calc(var(--bw) * 1.6) var(--bg), inset 0 0 0 calc(var(--bw) * 2.4) var(--c);
+  }
+  .logo[data-frame="brackets"] {
+    padding: var(--pad); --l: calc(var(--pad) * 1.7);
+    background:
+      linear-gradient(var(--c), var(--c)) top left     / var(--l) var(--bw) no-repeat,
+      linear-gradient(var(--c), var(--c)) top left     / var(--bw) var(--l) no-repeat,
+      linear-gradient(var(--c), var(--c)) top right    / var(--l) var(--bw) no-repeat,
+      linear-gradient(var(--c), var(--c)) top right    / var(--bw) var(--l) no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom left  / var(--l) var(--bw) no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom left  / var(--bw) var(--l) no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom right / var(--l) var(--bw) no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom right / var(--bw) var(--l) no-repeat;
+  }
+  .logo[data-frame="pill"] {
+    padding: var(--pad) calc(var(--pad) * 2.4); border: var(--bw) solid var(--c); border-radius: 9999px;
+    box-shadow: 0 0 calc(var(--pad) * 2.2 * var(--glow)) var(--c-soft);
+  }
+
+  #toast, #error {
+    position: absolute; left: 0; right: 0; text-align: center; color: #f2f6fa; pointer-events: none;
+    font: 1.6vh/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: .08em;
+  }
+  #toast { bottom: 2.2vh; text-transform: uppercase; opacity: 0; transition: opacity .4s; }
+  #toast.on { opacity: .6; }
+  #error { top: 45%; opacity: .75; white-space: pre-line; font-size: 2vh; }
+</style>
+</head>
+<body>
+<template id="tpl"><div class="logo"><div class="art"><div class="pic"></div></div></div></template>
+<div id="toast"></div>
+<div id="error"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ===========================================================================
+  //  Defaults (the same values are documented in config.ini)
+  // ===========================================================================
+  var SCREEN_DEFAULTS = {
+    count: '1', logos: 'all', frame: 'all', recolor: 'auto', same: 'no', glow: '1',
+    size: '0.5-1.15', shrink: '0.3', fill: '0.35', speed: '0.6-1.6', gap: '2.5',
+    collide: 'yes', jump: '70', messages: 'yes', background: '#111111'
+  };
+  var LOGO_DEFAULTS = { frame: 'all', recolor: 'all', size: '1', weight: '1' };
+  var FRAMES = ['off', 'glow', 'double', 'brackets', 'pill'];
+  var RECOLORS = ['on', 'match', 'off'];       // "auto" is a screen setting, not a mode
+  var MAX_COUNT = 40;
+  var IMAGE = /\.(svg|png|webp|gif|jpe?g)$/i;
+
+  // Geometry, as fractions of a logo's size unit u (u x u = the artwork's area)
+  var PAD = 0.15;        // gap between artwork and frame
+  var LINE = 0.022;      // frame line thickness (never thinner than 2px)
+  var UNIT = 5.25;       // normal u = sqrt(screen area) / UNIT
+  var SPEED_DIV = 7.5;   // normal speed = screen diagonal / SPEED_DIV  (px per second)
+
+  // ===========================================================================
+  //  Small helpers
+  // ===========================================================================
+  var rnd = function (a, b) { return a + Math.random() * (b - a); };
+  var lerp = function (a, b, t) { return a + (b - a) * t; };
+  var clamp = function (v, lo, hi) { return Math.min(hi, Math.max(lo, v)); };
+  var any = function (arr) { return arr[Math.floor(Math.random() * arr.length)]; };
+  var has = function (arr, v) { return arr.indexOf(v) >= 0; };
+  function num(v, lo, hi) { var n = parseFloat(v); return isFinite(n) ? clamp(n, lo, hi) : null; }
+  function numOr(v, lo, hi, def) { var n = num(v, lo, hi); return n == null ? def : n; }
+  function range(v, lo, hi) {
+    var m = String(v).match(/^\s*(\d*\.?\d+)\s*(?:[-,]\s*(\d*\.?\d+))?\s*$/);
+    if (!m) return null;
+    var a = clamp(+m[1], lo, hi), b = m[2] != null ? clamp(+m[2], lo, hi) : a;
+    return [Math.min(a, b), Math.max(a, b)];
+  }
+  function bool(v) { return /^\s*(yes|true|on|1)\s*$/i.test(v); }
+  // "all" or a list of known words. Unknown words are reported in the browser console.
+  function list(v, known, where) {
+    if (/^\s*all\s*$/i.test(v)) return known.slice();
+    var out = [];
+    String(v).split(/[\s,|]+/).forEach(function (w) {
+      w = w.toLowerCase(); if (!w) return;
+      if (w === 'none' || w === 'no') w = 'off';
+      if (w === 'yes') w = 'on';
+      if (has(known, w)) { if (!has(out, w)) out.push(w); }
+      else console.warn('config: unknown value "' + w + '" in ' + where + ' (known: ' + known.join(', ') + ')');
+    });
+    return out;
+  }
+  function baseName(file) { return file.replace(IMAGE, '').toLowerCase(); }
+
+  // config.ini  ->  { screen: {key: value}, logos: {lowercase name: {key: value}} }
+  function parseIni(text) {
+    var out = { screen: {}, logos: {} }, cur = null;
+    text.split(/\r?\n/).forEach(function (line, i) {
+      line = line.replace(/^\s*[;#].*$/, '').replace(/\s;.*$/, '').trim();
+      if (!line) return;
+      var sec = line.match(/^\[(.+)\]$/);
+      if (sec) {
+        var name = sec[1].trim();
+        cur = name.toLowerCase() === 'screen' ? out.screen : (out.logos[baseName(name)] = out.logos[baseName(name)] || { file: name });
+        return;
+      }
+      var kv = line.match(/^([\w-]+)\s*[=:]\s*(.*)$/);
+      if (!kv || !cur) { console.warn('config.ini line ' + (i + 1) + ' ignored: ' + line); return; }
+      cur[kv[1].toLowerCase()] = kv[2].trim();
+    });
+    return out;
+  }
+
+  // ===========================================================================
+  //  State
+  // ===========================================================================
+  var S;                      // screen settings
+  var files = [];             // every image in logos/ (with its rules, crop and outline)
+  var screenFrames, screenRecolor;   // current screen choices (config.ini, or keyboard overrides)
+  var shared = null;          // the one choice used by every logo when "same" is on
+  var logos = [];             // logos on screen
+  var target = 1, sinceSpawn = 0, frameNo = 0, W = innerWidth, H = innerHeight;
+  var tpl = document.getElementById('tpl'), toastEl = document.getElementById('toast');
+
+  // ===========================================================================
+  //  Loading: config.ini, the logos/ folder, and each image's visible artwork
+  // ===========================================================================
+  async function fetchText(url) {
+    try { var r = await fetch(url, { cache: 'no-store' }); return r.ok ? await r.text() : null; }
+    catch (e) { return null; }
+  }
+  async function listLogos(ini) {
+    var html = await fetchText('logos/'), names = [];
+    if (html) {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      doc.querySelectorAll('a[href]').forEach(function (a) {
+        var f = decodeURIComponent(a.getAttribute('href').split(/[?#]/)[0]).split('/').filter(Boolean).pop() || '';
+        if (IMAGE.test(f) && !has(names, f)) names.push(f);
+      });
+    }
+    if (!names.length) {                         // no folder listing: use the files named in config.ini
+      Object.keys(ini.logos).forEach(function (k) {
+        var f = ini.logos[k].file;
+        if (IMAGE.test(f)) names.push(f);
+        else console.warn('config.ini [' + f + ']: the folder cannot be listed, so use the full file name (e.g. [' + f + '.svg])');
+      });
+    }
+    return names.sort(function (a, b) { return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }); });
+  }
+
+  // Convex outline of a set of points (monotone chain), then drop near-useless corners
+  // until it has at most 32 (a heptagon keeps its 7).
+  function hull(pts) {
+    pts.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    var cross = function (o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); };
+    var lo = [], up = [];
+    pts.forEach(function (p) { while (lo.length > 1 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); });
+    for (var i = pts.length - 1; i >= 0; i--) {
+      var p = pts[i];
+      while (up.length > 1 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p);
+    }
+    var h = lo.slice(0, -1).concat(up.slice(0, -1));
+    while (h.length > 3) {
+      var best = -1, bestA = Infinity;
+      for (var j = 0; j < h.length; j++) {
+        var a = Math.abs(cross(h[(j + h.length - 1) % h.length], h[j], h[(j + 1) % h.length]));
+        if (a < bestA) { bestA = a; best = j; }
+      }
+      if (h.length <= 32 && bestA > 3e-4) break;
+      h.splice(best, 1);
+    }
+    // Anti-aliasing bevels sharp corners into two close points; restore the real corner
+    // (where the two neighbouring edges meet).
+    for (var k = 0; h.length > 3 && k < h.length; k++) {
+      var n = h.length, p0 = h[(k + n - 1) % n], p1 = h[k], p2 = h[(k + 1) % n], p3 = h[(k + 2) % n];
+      if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) > 0.03) continue;
+      var d1 = [p1[0] - p0[0], p1[1] - p0[1]], d2 = [p3[0] - p2[0], p3[1] - p2[1]];
+      var den = d1[0] * d2[1] - d1[1] * d2[0];
+      if (Math.abs(den) < 1e-9) continue;
+      var t = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / den;
+      var q = [p1[0] + t * d1[0], p1[1] + t * d1[1]];
+      if (Math.hypot(q[0] - p1[0], q[1] - p1[1]) > 0.05) continue;
+      if (k + 1 < n) h.splice(k, 2, q);
+      else { h.splice(k, 1, q); h.shift(); }     // the pair wraps round the end of the list
+      k = -1;
+    }
+    return h;
+  }
+
+  // Finds the non-transparent part of an image: its box as fractions of the whole image
+  // (cx, cy, cw, ch), the box's height/width ratio (asp) and its outline (shape, 0-1 inside the box).
+  function analyse(f) {
+    return new Promise(function (done) {
+      var img = new Image();
+      img.onerror = function () { f.bad = true; console.warn('could not load logos/' + f.file); done(); };
+      img.onload = function () {
+        img.style.cssText = 'position:absolute;visibility:hidden;width:1000px;height:auto';
+        document.body.appendChild(img);
+        var R = 1000 / (img.getBoundingClientRect().height || 500);          // image width / height
+        img.remove();
+        var cw = R >= 1 ? 1000 : Math.round(1000 * R), ch = R >= 1 ? Math.round(1000 / R) : 1000;
+        var x0 = 0, y0 = 0, x1 = cw, y1 = ch, edge = [];
+        try {
+          var cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+          var g = cv.getContext('2d'); g.drawImage(img, 0, 0, cw, ch);
+          var d = g.getImageData(0, 0, cw, ch).data, a = cw, b = ch, c = -1, e = -1;
+          for (var y = 0; y < ch; y++) {
+            var first = -1, lastX = -1;
+            for (var x = 0; x < cw; x++) if (d[(y * cw + x) * 4 + 3] > 8) { if (first < 0) first = x; lastX = x; }
+            if (first < 0) continue;
+            edge.push([first, y], [first, y + 1], [lastX + 1, y], [lastX + 1, y + 1]);
+            if (first < a) a = first; if (lastX > c) c = lastX; if (y < b) b = y; e = y;
+          }
+          if (c >= 0) { x0 = Math.max(0, a - 1); y0 = Math.max(0, b - 1); x1 = Math.min(cw, c + 2); y1 = Math.min(ch, e + 2); }
+        } catch (err) { console.warn('could not crop logos/' + f.file + ' to its artwork'); }
+        f.cx = x0 / cw; f.cy = y0 / ch; f.cw = (x1 - x0) / cw; f.ch = (y1 - y0) / ch;
+        f.asp = (y1 - y0) / (x1 - x0);
+        f.shape = edge.length ? hull(edge.map(function (p) { return [(p[0] - x0) / (x1 - x0), (p[1] - y0) / (y1 - y0)]; }))
+                              : [[0, 0], [1, 0], [1, 1], [0, 1]];
+        done();
+      };
+      img.src = f.url;
+    });
+  }
+  function selectFiles(spec) {                   // logos = all | 1-3 | 1,3 | name words
+    if (/^\s*all\s*$/i.test(spec)) return files.slice();
+    var out = [];
+    spec.split(/[,\s]+/).forEach(function (t) {
+      t = t.toLowerCase(); if (!t) return;
+      var m = t.match(/^(\d+)(?:-(\d+))?$/);
+      files.forEach(function (f, i) {
+        var hit = m ? (i + 1 >= +m[1] && i + 1 <= +(m[2] || m[1])) : f.file.toLowerCase().indexOf(t) >= 0;
+        if (hit && !has(out, f)) out.push(f);
+      });
+    });
+    if (!out.length) console.warn('logos = ' + spec + ' matched no files; using all');
+    return out.length ? out : files.slice();
+  }
+
+  // ===========================================================================
+  //  Choosing what a logo shows: a file, a frame and a recolour mode
+  //    the logo's rules say what is ALLOWED; the screen settings say what to SHOW.
+  //    recolor = auto (screen default) is the classic behaviour: recolour a logo only when it
+  //    has no frame. If a logo's rules forbid that, it uses whatever its rules allow.
+  // ===========================================================================
+  function combos(f) {
+    var out = [];
+    f.frames.forEach(function (fr) {
+      if (!has(screenFrames, fr)) return;
+      var want = screenRecolor === 'auto' ? [fr === 'off' ? 'on' : 'off'] : screenRecolor;
+      var modes = f.recolor.filter(function (m) { return has(want, m); });
+      if (!modes.length && screenRecolor === 'auto') modes = f.recolor.slice();
+      if (fr === 'off') modes = modes.map(function (m) { return m === 'match' ? 'on' : m; });  // same thing without a frame
+      modes.forEach(function (m) { if (!out.some(function (c) { return c.frame === fr && c.recolor === m; })) out.push({ frame: fr, recolor: m }); });
+    });
+    return out;
+  }
+  function options() {
+    return files.filter(function (f) { return f.use && !f.bad && f.weight > 0; })
+      .map(function (f) { return { f: f, combos: combos(f) }; })
+      .filter(function (o) { return o.combos.length; });
+  }
+  function pick() {
+    if (S.same && shared) return shared;
+    var opts = options(), total = 0;
+    opts.forEach(function (o) { total += o.f.weight; });
+    var r = Math.random() * total, o = opts[0];
+    for (var i = 0; i < opts.length; i++) { r -= opts[i].f.weight; if (r <= 0) { o = opts[i]; break; } }
+    var fr = any(o.combos.map(function (c) { return c.frame; }));              // frame first, then recolour mode
+    var c = any(o.combos.filter(function (c) { return c.frame === fr; }));
+    var choice = { f: o.f, frame: c.frame, recolor: c.recolor };
+    if (S.same) shared = choice;
+    return choice;
+  }
+  function show(o, choice) {
+    var f = choice.f, pic = o.el.querySelector('.pic');
+    o.f = f; o.frame = choice.frame; o.recolor = choice.recolor;
+    o.el.dataset.frame = choice.frame; o.el.dataset.recolor = choice.recolor;
+    o.el.style.setProperty('--img', 'url("' + f.url + '")');
+    pic.style.width = 100 / f.cw + '%';       pic.style.height = 100 / f.ch + '%';
+    pic.style.left = -f.cx / f.cw * 100 + '%'; pic.style.top = -f.cy / f.ch * 100 + '%';
+    setHue(o, o.hue);
+  }
+
+  // ===========================================================================
+  //  Size, shape, colour
+  // ===========================================================================
+  // Outer box of a logo with size unit u, and its outline for collisions (a convex polygon):
+  // the artwork's own outline without a frame, otherwise the frame's shape.
+  function geometry(frame, u, f) {
+    var aw = u / Math.sqrt(f.asp), ah = u * Math.sqrt(f.asp);
+    var pad = frame === 'off' ? 0 : PAD * u, bw = Math.max(2, LINE * u);
+    var border = frame === 'glow' || frame === 'pill' ? bw : frame === 'double' ? bw * 1.6 : 0;
+    var w = aw + 2 * (frame === 'pill' ? pad * 2.4 : pad) + 2 * border, h = ah + 2 * pad + 2 * border;
+    var poly;
+    if (frame === 'off') poly = f.shape.map(function (p) { return [p[0] * w, p[1] * h]; });
+    else poly = roundRect(w, h, frame === 'glow' ? pad * 1.1 : frame === 'double' ? pad * 0.35 : frame === 'pill' ? h / 2 : 0);
+    return { w: w, h: h, pad: pad, bw: bw, poly: poly, axes: axesOf(poly) };
+  }
+  function roundRect(w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    if (r < 1) return [[0, 0], [w, 0], [w, h], [0, h]];
+    var pts = [], corners = [[w - r, r, -90], [w - r, h - r, 0], [r, h - r, 90], [r, r, 180]];
+    corners.forEach(function (c) {
+      for (var i = 0; i <= 5; i++) {
+        var a = (c[2] + i * 18) * Math.PI / 180;
+        pts.push([c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)]);
+      }
+    });
+    return pts;
+  }
+  function axesOf(poly) {                        // edge normals, without parallel duplicates
+    var axes = [];
+    for (var i = 0; i < poly.length; i++) {
+      var p = poly[i], q = poly[(i + 1) % poly.length], ex = q[0] - p[0], ey = q[1] - p[1], l = Math.hypot(ex, ey);
+      if (l < 1e-6) continue;
+      var n = [ey / l, -ex / l];
+      if (!axes.some(function (a) { return Math.abs(a[0] * n[0] + a[1] * n[1]) > 0.9999; })) axes.push(n);
+    }
+    return axes;
+  }
+  function resize(o) {
+    var g = geometry(o.frame, o.u, o.f);
+    o.w = g.w; o.h = g.h; o.poly = g.poly; o.axes = g.axes;
+    o.el.style.width = g.w + 'px'; o.el.style.height = g.h + 'px';
+    o.el.style.setProperty('--pad', g.pad + 'px'); o.el.style.setProperty('--bw', g.bw + 'px');
+  }
+  // Target size of every logo: normal size x random size x per-logo size x count^-shrink,
+  // limited to 60% of the screen width / 35% of its height, and to `fill` of the screen in total.
+  // A logo with a fixed size (size = 240px) keeps that artwork width, only limited to fit the screen.
+  function retarget() {
+    var unit = Math.sqrt(W * H) / UNIT * Math.pow(target, -S.shrink), area = 0;
+    logos.forEach(function (o) {
+      var u = o.f.px ? o.f.px * Math.sqrt(o.f.asp) : unit * lerp(S.size[0], S.size[1], o.k) * o.f.size;
+      var g = geometry(o.frame, u, o.f), s = Math.min(1, 0.6 * W / g.w, 0.35 * H / g.h);
+      if (o.f.px) s = Math.min(1, 0.95 * W / g.w, 0.95 * H / g.h);
+      o.uT = u * s; area += g.w * g.h * s * s;
+    });
+    if (!logos.length) return;
+    var k = Math.sqrt(Math.min(1, S.fill * W * H / (area / logos.length * target)));
+    logos.forEach(function (o) { if (!o.f.px) o.uT = Math.max(12, o.uT * k); });
+  }
+  function hueDist(a, b) { var d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+  function hsl(h, a) { return 'hsla(' + (h % 360).toFixed(1) + ',92%,58%,' + a + ')'; }
+  function setHue(o, h) {
+    o.hue = h;
+    o.el.style.setProperty('--c', hsl(h, 1));
+    o.el.style.setProperty('--c-soft', hsl(h, 0.35));
+    // logo colour: the frame colour, or its opposite on the colour wheel for recolor = on with a frame
+    o.el.style.setProperty('--fill', hsl(o.recolor === 'on' && o.frame !== 'off' ? h + 180 : h, 1));
+  }
+  function recolor(o) {                          // never the same (or a nearby) colour twice in a row
+    if (o.rc === frameNo) return;
+    o.rc = frameNo;
+    var h; do { h = Math.random() * 360; } while (hueDist(h, o.hue) < S.jump);
+    setHue(o, h);
+  }
+  function freshHue() {                          // a hue far from those already on screen
+    var best = 0, bestD = -1;
+    for (var i = 0; i < 12; i++) {
+      var c = Math.random() * 360, d = 360;
+      logos.forEach(function (o) { d = Math.min(d, hueDist(c, o.hue)); });
+      if (d > bestD) { bestD = d; best = c; }
+    }
+    return best;
+  }
+  function speedOf(o) { return Math.sqrt(W * W + H * H) / SPEED_DIV * lerp(S.speed[0], S.speed[1], o.ks); }
+
+  // ===========================================================================
+  //  Collisions between logos: separating-axis test on their convex outlines.
+  //  Returns null, or the contact normal (pointing from a to b) and the overlap depth.
+  // ===========================================================================
+  function contact(a, b) {
+    if (a.x > b.x + b.w || b.x > a.x + a.w || a.y > b.y + b.h || b.y > a.y + a.h) return null;   // boxes apart
+    var best = Infinity, n = null, sets = [a.axes, b.axes];
+    for (var s = 0; s < 2; s++) for (var i = 0; i < sets[s].length; i++) {
+      var ax = sets[s][i], pa = project(a, ax), pb = project(b, ax);
+      var o = Math.min(pa[1], pb[1]) - Math.max(pa[0], pb[0]);
+      if (o <= 0) return null;
+      if (o < best) { best = o; n = ax; }
+    }
+    var dx = (b.x + b.w / 2) - (a.x + a.w / 2), dy = (b.y + b.h / 2) - (a.y + a.h / 2);
+    var sg = n[0] * dx + n[1] * dy < 0 ? -1 : 1;
+    return { nx: n[0] * sg, ny: n[1] * sg, pen: best };
+  }
+  function project(o, ax) {
+    var mn = Infinity, mx = -Infinity, off = o.x * ax[0] + o.y * ax[1];
+    for (var i = 0; i < o.poly.length; i++) {
+      var d = o.poly[i][0] * ax[0] + o.poly[i][1] * ax[1];
+      if (d < mn) mn = d; if (d > mx) mx = d;
+    }
+    return [mn + off, mx + off];
+  }
+  function boxesOverlap(a, b, m) {
+    return a.x < b.x + b.w + m && b.x < a.x + a.w + m && a.y < b.y + b.h + m && b.y < a.y + a.h + m;
+  }
+
+  // ===========================================================================
+  //  Adding and removing logos
+  // ===========================================================================
+  // The first logo appears at a random place. Later ones slide in from a random edge at a free spot,
+  // and pass through other logos until they are fully on screen and clear of everything.
+  function spawn() {
+    var el = tpl.content.firstElementChild.cloneNode(true);
+    document.body.insertBefore(el, toastEl);
+    var o = { el: el, k: Math.random(), ks: Math.random(), x: 0, y: 0, vx: 0, vy: 0, solid: false, entering: null, hue: 0 };
+    o.hue = freshHue();
+    logos.push(o); show(o, pick());
+    retarget(); o.u = o.uT; resize(o);
+    var s = speedOf(o);
+    if (logos.length === 1) {
+      var a = rnd(0.35, 1.2);
+      o.vx = (Math.random() < .5 ? -1 : 1) * Math.cos(a) * s;
+      o.vy = (Math.random() < .5 ? -1 : 1) * Math.sin(a) * s;
+      o.x = rnd(0, Math.max(0, W - o.w)); o.y = rnd(0, Math.max(0, H - o.h)); o.solid = true;
+      return place(o), true;
+    }
+    var off = PAD * 2.5 * S.glow * o.u + 4, m = Math.min(o.w, o.h) * 0.15;   // start far enough out that the glow is hidden
+    for (var t = 0; t < 60; t++) {
+      var e = 'LRTB'[Math.floor(Math.random() * 4)], side = e === 'L' || e === 'R';
+      var along = side ? rnd(0, Math.max(0, H - o.h)) : rnd(0, Math.max(0, W - o.w));
+      var inside = side ? { x: e === 'L' ? 0 : W - o.w, y: along } : { x: along, y: e === 'T' ? 0 : H - o.h };
+      var out = side ? { x: e === 'L' ? -o.w - off : W + off, y: along } : { x: along, y: e === 'T' ? -o.h - off : H + off };
+      inside.w = out.w = o.w; inside.h = out.h = o.h;
+      if (logos.some(function (p) { return p !== o && (boxesOverlap(inside, p, m) || boxesOverlap(out, p, m)); })) continue;
+      var ang = rnd(-0.95, 0.95), inward = Math.cos(ang) * s, across = Math.sin(ang) * s;
+      if (side) { o.vx = e === 'L' ? inward : -inward; o.vy = across; }
+      else      { o.vy = e === 'T' ? inward : -inward; o.vx = across; }
+      o.x = out.x; o.y = out.y; o.entering = e;
+      return place(o), true;
+    }
+    logos.pop(); el.remove();                    // no free spot right now; try again shortly
+    return false;
+  }
+  function remove(o) {
+    logos.splice(logos.indexOf(o), 1);
+    o.el.classList.add('gone');
+    setTimeout(function () { o.el.remove(); }, 400);
+  }
+  function place(o) { o.el.style.transform = 'translate3d(' + o.x + 'px,' + o.y + 'px,0)'; }
+  // Give every logo a new choice under the current rules (keyboard).
+  function reshow() {
+    shared = null;
+    logos.forEach(function (o) { show(o, pick()); resize(o); });
+    retarget();
+  }
+
+  // ===========================================================================
+  //  Main loop
+  // ===========================================================================
+  var last = 0;
+  function frame(t) {
+    var dt = last ? Math.min((t - last) / 1000, 0.05) : 0; last = t; frameNo++;
+
+    if (logos.length < target && (sinceSpawn += dt) >= S.gap) sinceSpawn = spawn() ? 0 : S.gap - 0.4;
+
+    logos.forEach(function (o) {                // sizes ease towards their targets
+      if (o.u === o.uT) return;
+      o.u = Math.abs(o.uT - o.u) < 0.2 ? o.uT : o.u + (o.uT - o.u) * Math.min(1, dt * 4);
+      resize(o);
+    });
+
+    logos.forEach(function (o) { o.x += o.vx * dt; o.y += o.vy * dt; });
+
+    if (S.collide) for (var pass = 0; pass < 3; pass++) {
+      for (var i = 0; i < logos.length; i++) for (var j = i + 1; j < logos.length; j++) {
+        var a = logos[i], b = logos[j];
+        if (!a.solid || !b.solid) continue;
+        var c = contact(a, b);
+        if (!c) continue;
+        a.x -= c.nx * c.pen / 2; a.y -= c.ny * c.pen / 2;
+        b.x += c.nx * c.pen / 2; b.y += c.ny * c.pen / 2;
+        var da = a.vx * c.nx + a.vy * c.ny, db = b.vx * c.nx + b.vy * c.ny;
+        if (da > db) {                           // approaching: each mirrors off the contact surface (keeps its speed)
+          if (da > 0) { a.vx -= 2 * da * c.nx; a.vy -= 2 * da * c.ny; recolor(a); }
+          if (db < 0) { b.vx -= 2 * db * c.nx; b.vy -= 2 * db * c.ny; recolor(b); }
+        }
+      }
+    }
+
+    logos.forEach(function (o) {
+      var maxX = Math.max(0, W - o.w), maxY = Math.max(0, H - o.h), e = o.entering, hit = false;
+      if ((e === 'L' && o.x >= 0) || (e === 'R' && o.x <= maxX) || (e === 'T' && o.y >= 0) || (e === 'B' && o.y <= maxY)) {
+        o.entering = e = null;                   // fully on screen: all four edges apply from now on
+      }
+      if (e !== 'L' && o.x <= 0)    { o.x = 0;    o.vx =  Math.abs(o.vx); hit = true; }
+      if (e !== 'R' && o.x >= maxX) { o.x = maxX; o.vx = -Math.abs(o.vx); hit = true; }
+      if (e !== 'T' && o.y <= 0)    { o.y = 0;    o.vy =  Math.abs(o.vy); hit = true; }
+      if (e !== 'B' && o.y >= maxY) { o.y = maxY; o.vy = -Math.abs(o.vy); hit = true; }
+      if (hit) recolor(o);
+      if (!o.solid && !o.entering) o.solid = !logos.some(function (p) { return p !== o && p.solid && contact(o, p); });
+      place(o);
+    });
+    requestAnimationFrame(frame);
+  }
+
+  // ===========================================================================
+  //  Keyboard, resize, messages
+  // ===========================================================================
+  var toastTimer = 0;
+  function toast(msg) {
+    if (!S.messages) return;
+    toastEl.textContent = msg; toastEl.className = 'on';
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.className = ''; }, 1800);
+  }
+  function fail(msg) { document.getElementById('error').textContent = msg; }
+  // Try new screen choices; keep the old ones if no logo would be allowed to show them.
+  function tryScreen(frames, recolorSetting, msg) {
+    var pf = screenFrames, pr = screenRecolor;
+    screenFrames = frames; screenRecolor = recolorSetting;
+    if (!options().length) { screenFrames = pf; screenRecolor = pr; toast('no logo is allowed to do that'); return; }
+    reshow(); toast(msg);
+  }
+  var RECOLOR_CYCLE = ['auto', 'on', 'match', 'off'];
+
+  window.addEventListener('keydown', function (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey || !S) return;
+    var k = e.key, n = parseInt(k, 10);
+    if (n >= 1 && n <= FRAMES.length) {
+      tryScreen([FRAMES[n - 1]], screenRecolor, 'frame: ' + (FRAMES[n - 1] === 'off' ? 'none' : FRAMES[n - 1]));
+    } else if (k === 'r' || k === 'R') {
+      var cur = screenRecolor === 'auto' ? 'auto' : screenRecolor.length === 1 ? screenRecolor[0] : 'auto';
+      var next = RECOLOR_CYCLE[(RECOLOR_CYCLE.indexOf(cur) + 1) % RECOLOR_CYCLE.length];
+      tryScreen(screenFrames, next === 'auto' ? 'auto' : [next], 'recolour: ' + next);
+    } else if (k === '0') {
+      tryScreen(S.frame, S.recolor, 'as configured');
+    } else if (k === 's' || k === 'S') {
+      S.same = !S.same; reshow(); toast(S.same ? 'all the same' : 'mixed');
+    } else if (k === '+' || k === '=') {
+      if (target < MAX_COUNT) { target++; sinceSpawn = S.gap; retarget(); toast('logos: ' + target); }
+    } else if (k === '-' || k === '_') {
+      if (target > 1) {
+        target--;
+        if (logos.length > target) remove(any(logos));
+        retarget(); toast('logos: ' + target);
+      }
+    }
+  });
+  window.addEventListener('resize', function () {
+    var ow = W, oh = H; W = innerWidth; H = innerHeight;
+    if (!S) return;
+    retarget();
+    logos.forEach(function (o) {
+      if (!o.entering) { o.x *= W / ow; o.y *= H / oh; }
+      var m = Math.sqrt(o.vx * o.vx + o.vy * o.vy) || 1, s = speedOf(o);
+      o.vx *= s / m; o.vy *= s / m;
+    });
+  });
+
+  // ===========================================================================
+  //  Start
+  // ===========================================================================
+  async function start() {
+    if (location.protocol === 'file:') {
+      return fail('This page has to be served by a web server so it can read the logos folder.\n' +
+                  'In this folder run:  python3 -m http.server 8000\nthen open  http://localhost:8000/');
+    }
+    var ini = parseIni((await fetchText('config.ini')) || '');
+
+    // screen settings: defaults <- config.ini [screen] <- URL
+    var raw = Object.assign({}, SCREEN_DEFAULTS, ini.screen), url = new URLSearchParams(location.search);
+    Object.keys(SCREEN_DEFAULTS).forEach(function (key) { if (url.has(key)) raw[key] = url.get(key); });
+    Object.keys(ini.screen).forEach(function (key) {
+      if (!(key in SCREEN_DEFAULTS)) console.warn('config.ini [screen]: unknown setting "' + key + '"' + (key === 'looks' ? ' (now: frame and recolor)' : ''));
+    });
+    var D = SCREEN_DEFAULTS;
+    S = {
+      count:    Math.round(numOr(raw.count, 1, MAX_COUNT, +D.count)),
+      logos:    raw.logos,
+      frame:    list(raw.frame, FRAMES, '[screen] frame'),
+      recolor:  /^\s*auto\s*$/i.test(raw.recolor) ? 'auto' : list(raw.recolor, RECOLORS, '[screen] recolor'),
+      same:     bool(raw.same),
+      glow:     numOr(raw.glow, 0, 10, +D.glow),
+      size:     range(raw.size, 0.05, 5) || range(D.size, 0, 99),
+      shrink:   numOr(raw.shrink, 0, 2, +D.shrink),
+      fill:     numOr(raw.fill, 0.02, 0.9, +D.fill),
+      speed:    range(raw.speed, 0.05, 8) || range(D.speed, 0, 99),
+      gap:      numOr(raw.gap, 0, 600, +D.gap),
+      collide:  bool(raw.collide),
+      jump:     numOr(raw.jump, 0, 120, +D.jump),
+      messages: bool(raw.messages)
+    };
+    if (!S.frame.length) S.frame = FRAMES.slice();
+    if (S.recolor !== 'auto' && !S.recolor.length) S.recolor = 'auto';
+    screenFrames = S.frame; screenRecolor = S.recolor; target = S.count;
+    document.body.style.background = raw.background;
+    document.body.style.setProperty('--bg', raw.background);
+    document.body.style.setProperty('--glow', S.glow);
+
+    // the logos folder, with each file's rules
+    var names = await listLogos(ini);
+    if (!names.length) {
+      return fail('No logos found.\nPut .svg / .png / .webp files in a folder called "logos" next to index.html.');
+    }
+    files = names.map(function (name) {
+      var rule = ini.logos[baseName(name)] || {}, where = '[' + name + '] ';
+      Object.keys(rule).forEach(function (key) {
+        if (key !== 'file' && !(key in LOGO_DEFAULTS)) console.warn('config.ini ' + where + 'unknown setting "' + key + '"' + (key === 'looks' ? ' (now: frame and recolor)' : ''));
+      });
+      var size = rule.size || LOGO_DEFAULTS.size, px = /px\s*$/i.test(size);
+      return {
+        file: name, url: 'logos/' + encodeURIComponent(name),
+        frames:  list(rule.frame || LOGO_DEFAULTS.frame, FRAMES, where + 'frame'),
+        recolor: list(rule.recolor || LOGO_DEFAULTS.recolor, RECOLORS, where + 'recolor'),
+        size:    px ? 1 : numOr(size, 0.05, 10, 1),
+        px:      px ? numOr(size, 8, 10000, null) : null,
+        weight:  numOr(rule.weight, 0, 1000, 1)
+      };
+    });
+    selectFiles(S.logos).forEach(function (f) { f.use = true; });
+    await Promise.all(files.filter(function (f) { return f.use; }).map(analyse));
+    if (!options().length) {
+      return fail('No logo is allowed to show "frame = ' + raw.frame + '" with "recolor = ' + raw.recolor + '".\nCheck config.ini.');
+    }
+    window.bounce = { settings: S, files: files, logos: logos, options: options };   // for inspecting in the browser console
+    spawn();
+    requestAnimationFrame(frame);
+  }
+  start();
+})();
+</script>
+</body>
+</html>
