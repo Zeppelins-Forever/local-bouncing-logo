@@ -6,7 +6,7 @@
 <title>Bouncing logo</title>
 <link rel="icon" href="data:,">
 <!--
-  BOUNCING LOGO
+  BOUNCING LOGO   (how to use it: README.md)
 
   Folder layout (names are fixed):
       index.html     this page
@@ -17,8 +17,8 @@
   and open http://localhost:8000/
 
   Keyboard:  +  add a logo           -  remove a logo          s  toggle "all the same"
-             1-5  one frame for all (1 none, 2 glow, 3 double, 4 brackets, 5 pill)
-             r  cycle recolour (auto, on, match, off)      0  back to config.ini
+             1-5  one frame for all (1 none, 2 rounded, 3 double, 4 brackets, 5 pill)
+             r  cycle recolor (auto, on, match, off)      0  back to config.ini
 -->
 <style>
   html, body { margin: 0; width: 100vw; height: 100vh; height: 100dvh; overflow: hidden; background: #111; }
@@ -42,8 +42,8 @@
             mask: var(--img) 0 0 / 100% 100% no-repeat;
   }
 
-  /* ---- frames (--glow on <body> is the `glow` setting) ---- */
-  .logo[data-frame="glow"] {
+  /* ---- frames (--glow on <body> is the `glow` setting: glow strength of rounded and pill) ---- */
+  .logo[data-frame="rounded"] {
     padding: var(--pad); border: var(--bw) solid var(--c); border-radius: calc(var(--pad) * 1.1);
     box-shadow: 0 0 calc(var(--pad) * 2.2 * var(--glow)) var(--c-soft),
                 inset 0 0 calc(var(--pad) * 2.2 * var(--glow)) var(--c-soft);
@@ -92,11 +92,11 @@
   // ===========================================================================
   var SCREEN_DEFAULTS = {
     count: '1', logos: 'all', frame: 'all', recolor: 'auto', same: 'no', glow: '1',
-    size: '0.5-1.15', shrink: '0.3', fill: '0.35', speed: '0.6-1.6', gap: '2.5',
+    size: '0.5-1.15', shrink: '0.3', fill: '0.35', speed: '0.6-1.6', 'speed-cap': 'off', spin: 'off', gap: '2.5',
     collide: 'yes', jump: '70', messages: 'yes', background: '#111111'
   };
   var LOGO_DEFAULTS = { frame: 'all', recolor: 'all', size: '1', weight: '1' };
-  var FRAMES = ['off', 'glow', 'double', 'brackets', 'pill'];
+  var FRAMES = ['off', 'rounded', 'double', 'brackets', 'pill'];
   var RECOLORS = ['on', 'match', 'off'];       // "auto" is a screen setting, not a mode
   var MAX_COUNT = 40;
   var IMAGE = /\.(svg|png|webp|gif|jpe?g)$/i;
@@ -106,6 +106,11 @@
   var LINE = 0.022;      // frame line thickness (never thinner than 2px)
   var UNIT = 5.25;       // normal u = sqrt(screen area) / UNIT
   var SPEED_DIV = 7.5;   // normal speed = screen diagonal / SPEED_DIV  (px per second)
+  var MIN_ANGLE = 10;    // degrees: logos never move closer than this to straight across / up-down
+  // spin (only used when spin is on)
+  var SPIN_MAX = 7;      // fastest spin, radians per second (about 1.1 turns a second)
+  var SPIN_FADE = 0.25;  // spin slows by this fraction per second
+  var GRIP = 0.3;        // friction between touching logos (makes glancing hits spin them)
 
   // ===========================================================================
   //  Small helpers
@@ -131,6 +136,7 @@
     String(v).split(/[\s,|]+/).forEach(function (w) {
       w = w.toLowerCase(); if (!w) return;
       if (w === 'none' || w === 'no') w = 'off';
+      if (w === 'glow' && has(known, 'rounded')) w = 'rounded';   // old name of the rounded frame
       if (w === 'yes') w = 'on';
       if (has(known, w)) { if (!has(out, w)) out.push(w); }
       else console.warn('config: unknown value "' + w + '" in ' + where + ' (known: ' + known.join(', ') + ')');
@@ -337,12 +343,25 @@
   function geometry(frame, u, f) {
     var aw = u / Math.sqrt(f.asp), ah = u * Math.sqrt(f.asp);
     var pad = frame === 'off' ? 0 : PAD * u, bw = Math.max(2, LINE * u);
-    var border = frame === 'glow' || frame === 'pill' ? bw : frame === 'double' ? bw * 1.6 : 0;
+    var border = frame === 'rounded' || frame === 'pill' ? bw : frame === 'double' ? bw * 1.6 : 0;
     var w = aw + 2 * (frame === 'pill' ? pad * 2.4 : pad) + 2 * border, h = ah + 2 * pad + 2 * border;
     var poly;
     if (frame === 'off') poly = f.shape.map(function (p) { return [p[0] * w, p[1] * h]; });
-    else poly = roundRect(w, h, frame === 'glow' ? pad * 1.1 : frame === 'double' ? pad * 0.35 : frame === 'pill' ? h / 2 : 0);
+    else poly = roundRect(w, h, frame === 'rounded' ? pad * 1.1 : frame === 'double' ? pad * 0.35 : frame === 'pill' ? h / 2 : 0);
     return { w: w, h: h, pad: pad, bw: bw, poly: poly, axes: axesOf(poly) };
+  }
+  // The outline (rp), its edge normals (ra) and half-extents (ex, ey) at the logo's current angle.
+  // Without spin the angle is always 0 and nothing is recalculated.
+  function orient(o) {
+    if (!o.th) { o.rp = o.pc; o.ra = o.ax; o.ex = o.w / 2; o.ey = o.h / 2; return; }
+    var c = Math.cos(o.th), s = Math.sin(o.th), ex = 0, ey = 0;
+    o.rp = o.pc.map(function (p) {
+      var x = p[0] * c - p[1] * s, y = p[0] * s + p[1] * c;
+      if (Math.abs(x) > ex) ex = Math.abs(x); if (Math.abs(y) > ey) ey = Math.abs(y);
+      return [x, y];
+    });
+    o.ra = o.ax.map(function (a) { return [a[0] * c - a[1] * s, a[0] * s + a[1] * c]; });
+    o.ex = ex; o.ey = ey;
   }
   function roundRect(w, h, r) {
     r = Math.min(r, w / 2, h / 2);
@@ -368,7 +387,9 @@
   }
   function resize(o) {
     var g = geometry(o.frame, o.u, o.f);
-    o.w = g.w; o.h = g.h; o.poly = g.poly; o.axes = g.axes;
+    o.w = g.w; o.h = g.h; o.ax = g.axes;
+    o.pc = g.poly.map(function (p) { return [p[0] - g.w / 2, p[1] - g.h / 2]; });   // outline around the centre
+    orient(o);
     o.el.style.width = g.w + 'px'; o.el.style.height = g.h + 'px';
     o.el.style.setProperty('--pad', g.pad + 'px'); o.el.style.setProperty('--bw', g.bw + 'px');
   }
@@ -411,32 +432,135 @@
     }
     return best;
   }
-  function speedOf(o) { return Math.sqrt(W * W + H * H) / SPEED_DIV * lerp(S.speed[0], S.speed[1], o.ks); }
+  function normalSpeed() { return Math.sqrt(W * W + H * H) / SPEED_DIV; }
+  function speedOf(o) { return normalSpeed() * Math.min(lerp(S.speed[0], S.speed[1], o.ks), S.speedCap); }
 
   // ===========================================================================
   //  Collisions between logos: separating-axis test on their convex outlines.
   //  Returns null, or the contact normal (pointing from a to b) and the overlap depth.
   // ===========================================================================
   function contact(a, b) {
-    if (a.x > b.x + b.w || b.x > a.x + a.w || a.y > b.y + b.h || b.y > a.y + a.h) return null;   // boxes apart
-    var best = Infinity, n = null, sets = [a.axes, b.axes];
+    var dx = (b.x + b.w / 2) - (a.x + a.w / 2), dy = (b.y + b.h / 2) - (a.y + a.h / 2);
+    if (Math.abs(dx) > a.ex + b.ex || Math.abs(dy) > a.ey + b.ey) return null;          // boxes apart
+    var best = Infinity, n = null, sets = [a.ra, b.ra];
     for (var s = 0; s < 2; s++) for (var i = 0; i < sets[s].length; i++) {
       var ax = sets[s][i], pa = project(a, ax), pb = project(b, ax);
       var o = Math.min(pa[1], pb[1]) - Math.max(pa[0], pb[0]);
       if (o <= 0) return null;
       if (o < best) { best = o; n = ax; }
     }
-    var dx = (b.x + b.w / 2) - (a.x + a.w / 2), dy = (b.y + b.h / 2) - (a.y + a.h / 2);
     var sg = n[0] * dx + n[1] * dy < 0 ? -1 : 1;
     return { nx: n[0] * sg, ny: n[1] * sg, pen: best };
   }
   function project(o, ax) {
-    var mn = Infinity, mx = -Infinity, off = o.x * ax[0] + o.y * ax[1];
-    for (var i = 0; i < o.poly.length; i++) {
-      var d = o.poly[i][0] * ax[0] + o.poly[i][1] * ax[1];
+    var mn = Infinity, mx = -Infinity, off = (o.x + o.w / 2) * ax[0] + (o.y + o.h / 2) * ax[1];
+    for (var i = 0; i < o.rp.length; i++) {
+      var d = o.rp[i][0] * ax[0] + o.rp[i][1] * ax[1];
       if (d < mn) mn = d; if (d > mx) mx = d;
     }
     return [mn + off, mx + off];
+  }
+  // Elastic collision: momentum is exchanged along the contact normal, heavier (larger) logos
+  // push lighter ones further. Both logos are affected, whichever way each was moving.
+  // With spin on, the hit also acts at the point of contact: off-centre and glancing hits
+  // (through GRIP, a little friction) set logos spinning.
+  function bump(a, b, c) {
+    var nx = c.nx, ny = c.ny, ma = a.w * a.h, mb = b.w * b.h;
+    var ia = 0, ib = 0, rax = 0, ray = 0, rbx = 0, rby = 0;          // inverse inertia, centre -> contact
+    if (S.spin) {
+      var pa = support(a, nx, ny), pb = support(b, -nx, -ny);
+      var px = (pa[0] + pb[0]) / 2, py = (pa[1] + pb[1]) / 2;
+      rax = px - (a.x + a.w / 2); ray = py - (a.y + a.h / 2);
+      rbx = px - (b.x + b.w / 2); rby = py - (b.y + b.h / 2);
+      ia = 12 / (ma * (a.w * a.w + a.h * a.h)); ib = 12 / (mb * (b.w * b.w + b.h * b.h));
+    }
+    // velocity of each logo at the contact point (v + spin x r), and the push along the normal
+    var rel = function (tx, ty) {
+      return (b.vx - b.om * rby - a.vx + a.om * ray) * tx + (b.vy + b.om * rbx - a.vy - a.om * rax) * ty;
+    };
+    var vn = rel(nx, ny);
+    if (vn >= 0) return;                          // already moving apart
+    var push = function (tx, ty, j) {
+      var ra = rax * ty - ray * tx, rb = rbx * ty - rby * tx;
+      a.vx -= j / ma * tx; a.vy -= j / ma * ty; a.om -= ra * j * ia;
+      b.vx += j / mb * tx; b.vy += j / mb * ty; b.om += rb * j * ib;
+    };
+    var resist = function (tx, ty) {
+      var ra = rax * ty - ray * tx, rb = rbx * ty - rby * tx;
+      return 1 / ma + 1 / mb + ra * ra * ia + rb * rb * ib;
+    };
+    var j = -2 * vn / resist(nx, ny);
+    push(nx, ny, j);
+    if (S.spin) {
+      var tx = -ny, ty = nx, jt = -rel(tx, ty) / resist(tx, ty);
+      push(tx, ty, clamp(jt, -GRIP * j, GRIP * j));
+      a.om = clamp(a.om, -SPIN_MAX, SPIN_MAX); b.om = clamp(b.om, -SPIN_MAX, SPIN_MAX);
+    }
+    keepMoving(a, -c.nx, -c.ny); keepMoving(b, c.nx, c.ny);
+    straighten(a, -c.nx, -c.ny); straighten(b, c.nx, c.ny);
+    recolor(a); recolor(b);
+  }
+  // Right after a hit a logo may be much faster or slower than its own speed (or stopped):
+  // keep it between 0.5x and 2x (and under speed-cap), then ease back to its own speed over a few seconds.
+  function keepMoving(o, nx, ny) {
+    var s = Math.hypot(o.vx, o.vy), T = o.sp;
+    if (s < 1e-6) { o.vx = nx * T * 0.5; o.vy = ny * T * 0.5; return; }
+    var k = clamp(s, 0.5 * T, Math.min(2 * T, normalSpeed() * S.speedCap)) / s;
+    o.vx *= k; o.vy *= k;
+  }
+  function settle(o, dt) {
+    var s = Math.hypot(o.vx, o.vy);
+    if (!s || Math.abs(s - o.sp) < 0.5) return;
+    var k = (s + (o.sp - s) * Math.min(1, dt * 0.8)) / s;
+    o.vx *= k; o.vy *= k;
+  }
+  // Never travel within MIN_ANGLE of straight across or straight up/down (the boring case
+  // where a logo just shuttles between two walls).
+  // (nx, ny): preferred direction for a component that is exactly zero, e.g. away from what was hit.
+  function straighten(o, nx, ny) {
+    var s = Math.hypot(o.vx, o.vy); if (!s) return;
+    var a = Math.atan2(Math.abs(o.vy), Math.abs(o.vx)), m = MIN_ANGLE * Math.PI / 180;
+    var na = clamp(a, m, Math.PI / 2 - m);
+    if (na === a) return;
+    var sign = function (v, pref) { return v < 0 ? -1 : v > 0 ? 1 : pref < 0 ? -1 : pref > 0 ? 1 : (Math.random() < .5 ? -1 : 1); };
+    o.vx = sign(o.vx, nx || 0) * Math.cos(na) * s;
+    o.vy = sign(o.vy, ny || 0) * Math.sin(na) * s;
+  }
+  // The point of o that reaches furthest in direction (nx, ny): the middle of a flat side, or a corner.
+  function support(o, nx, ny) {
+    var best = -Infinity, i, d, sx = 0, sy = 0, k = 0, eps = 0.02 * Math.max(o.w, o.h);
+    for (i = 0; i < o.rp.length; i++) { d = o.rp[i][0] * nx + o.rp[i][1] * ny; if (d > best) best = d; }
+    for (i = 0; i < o.rp.length; i++) {
+      d = o.rp[i][0] * nx + o.rp[i][1] * ny;
+      if (d > best - eps) { sx += o.rp[i][0]; sy += o.rp[i][1]; k++; }
+    }
+    return [o.x + o.w / 2 + sx / k, o.y + o.h / 2 + sy / k];
+  }
+  // Spin slowly fades out. spin = on: as it fades the logo eases back upright; spin = free: it stays
+  // at whatever angle it stops.
+  function turn(o, dt) {
+    if (!o.om && !o.th) return;
+    o.om *= Math.exp(-SPIN_FADE * dt);
+    if (S.spin === 'on' && Math.abs(o.om) < 1.5) {
+      var err = Math.atan2(Math.sin(o.th), Math.cos(o.th));          // angle from upright, -pi..pi
+      o.om += (-5 * err - 3 * o.om) * dt;
+      if (Math.abs(err) < 0.002 && Math.abs(o.om) < 0.02) { o.th = 0; o.om = 0; orient(o); return; }
+    } else if (Math.abs(o.om) < 0.02) { o.om = 0; return; }
+    o.th = Math.atan2(Math.sin(o.th + o.om * dt), Math.cos(o.th + o.om * dt));
+    orient(o);
+  }
+  // Allowed range for o.x / o.y: the visible outline (rotated, if spinning) touches the screen edge.
+  // An entering logo is not held back at the edge it is coming in from.
+  function limits(o) {
+    var minX = o.ex - o.w / 2, minY = o.ey - o.h / 2;
+    return [minX, Math.max(minX, W - o.w / 2 - o.ex), minY, Math.max(minY, H - o.h / 2 - o.ey)];
+  }
+  function keepOnScreen(o) {
+    var l = limits(o), e = o.entering;
+    if (e !== 'L' && o.x < l[0]) o.x = l[0];
+    if (e !== 'R' && o.x > l[1]) o.x = l[1];
+    if (e !== 'T' && o.y < l[2]) o.y = l[2];
+    if (e !== 'B' && o.y > l[3]) o.y = l[3];
   }
   function boxesOverlap(a, b, m) {
     return a.x < b.x + b.w + m && b.x < a.x + a.w + m && a.y < b.y + b.h + m && b.y < a.y + a.h + m;
@@ -450,16 +574,16 @@
   function spawn() {
     var el = tpl.content.firstElementChild.cloneNode(true);
     document.body.insertBefore(el, toastEl);
-    var o = { el: el, k: Math.random(), ks: Math.random(), x: 0, y: 0, vx: 0, vy: 0, solid: false, entering: null, hue: 0 };
+    var o = { el: el, k: Math.random(), ks: Math.random(), x: 0, y: 0, vx: 0, vy: 0, th: 0, om: 0, solid: false, entering: null, hue: 0 };
     o.hue = freshHue();
     logos.push(o); show(o, pick());
     retarget(); o.u = o.uT; resize(o);
-    var s = speedOf(o);
+    var s = o.sp = speedOf(o);
     if (logos.length === 1) {
       var a = rnd(0.35, 1.2);
       o.vx = (Math.random() < .5 ? -1 : 1) * Math.cos(a) * s;
       o.vy = (Math.random() < .5 ? -1 : 1) * Math.sin(a) * s;
-      o.x = rnd(0, Math.max(0, W - o.w)); o.y = rnd(0, Math.max(0, H - o.h)); o.solid = true;
+      o.x = rnd(0, Math.max(0, W - o.w)); o.y = rnd(0, Math.max(0, H - o.h)); o.solid = true; straighten(o);
       return place(o), true;
     }
     var off = PAD * 2.5 * S.glow * o.u + 4, m = Math.min(o.w, o.h) * 0.15;   // start far enough out that the glow is hidden
@@ -473,6 +597,7 @@
       var ang = rnd(-0.95, 0.95), inward = Math.cos(ang) * s, across = Math.sin(ang) * s;
       if (side) { o.vx = e === 'L' ? inward : -inward; o.vy = across; }
       else      { o.vy = e === 'T' ? inward : -inward; o.vx = across; }
+      straighten(o);
       o.x = out.x; o.y = out.y; o.entering = e;
       return place(o), true;
     }
@@ -484,7 +609,9 @@
     o.el.classList.add('gone');
     setTimeout(function () { o.el.remove(); }, 400);
   }
-  function place(o) { o.el.style.transform = 'translate3d(' + o.x + 'px,' + o.y + 'px,0)'; }
+  function place(o) {
+    o.el.style.transform = 'translate3d(' + o.x + 'px,' + o.y + 'px,0)' + (o.th ? ' rotate(' + o.th + 'rad)' : '');
+  }
   // Give every logo a new choice under the current rules (keyboard).
   function reshow() {
     shared = null;
@@ -508,8 +635,9 @@
     });
 
     logos.forEach(function (o) { o.x += o.vx * dt; o.y += o.vy * dt; });
+    if (S.spin) logos.forEach(function (o) { turn(o, dt); });
 
-    if (S.collide) for (var pass = 0; pass < 3; pass++) {
+    if (S.collide) for (var pass = 0; pass < (S.spin ? 6 : 3); pass++) {    // spinning shapes need a few more passes to settle
       for (var i = 0; i < logos.length; i++) for (var j = i + 1; j < logos.length; j++) {
         var a = logos[i], b = logos[j];
         if (!a.solid || !b.solid) continue;
@@ -517,23 +645,22 @@
         if (!c) continue;
         a.x -= c.nx * c.pen / 2; a.y -= c.ny * c.pen / 2;
         b.x += c.nx * c.pen / 2; b.y += c.ny * c.pen / 2;
-        var da = a.vx * c.nx + a.vy * c.ny, db = b.vx * c.nx + b.vy * c.ny;
-        if (da > db) {                           // approaching: each mirrors off the contact surface (keeps its speed)
-          if (da > 0) { a.vx -= 2 * da * c.nx; a.vy -= 2 * da * c.ny; recolor(a); }
-          if (db < 0) { b.vx -= 2 * db * c.nx; b.vy -= 2 * db * c.ny; recolor(b); }
-        }
+        bump(a, b, c);
       }
+      logos.forEach(keepOnScreen);              // so pushes apart and edges settle together
     }
+    logos.forEach(function (o) { settle(o, dt); });
 
     logos.forEach(function (o) {
-      var maxX = Math.max(0, W - o.w), maxY = Math.max(0, H - o.h), e = o.entering, hit = false;
-      if ((e === 'L' && o.x >= 0) || (e === 'R' && o.x <= maxX) || (e === 'T' && o.y >= 0) || (e === 'B' && o.y <= maxY)) {
+      var l = limits(o), minX = l[0], maxX = l[1], minY = l[2], maxY = l[3], e = o.entering, hit = false;
+      if ((e === 'L' && o.x >= minX) || (e === 'R' && o.x <= maxX) || (e === 'T' && o.y >= minY) || (e === 'B' && o.y <= maxY)) {
         o.entering = e = null;                   // fully on screen: all four edges apply from now on
       }
-      if (e !== 'L' && o.x <= 0)    { o.x = 0;    o.vx =  Math.abs(o.vx); hit = true; }
-      if (e !== 'R' && o.x >= maxX) { o.x = maxX; o.vx = -Math.abs(o.vx); hit = true; }
-      if (e !== 'T' && o.y <= 0)    { o.y = 0;    o.vy =  Math.abs(o.vy); hit = true; }
-      if (e !== 'B' && o.y >= maxY) { o.y = maxY; o.vy = -Math.abs(o.vy); hit = true; }
+      // a bounce (and colour change) only when moving into the edge, not when merely pushed against it
+      if (e !== 'L' && o.x <= minX) { o.x = minX; if (o.vx < 0) { o.vx = -o.vx; hit = true; } }
+      if (e !== 'R' && o.x >= maxX) { o.x = maxX; if (o.vx > 0) { o.vx = -o.vx; hit = true; } }
+      if (e !== 'T' && o.y <= minY) { o.y = minY; if (o.vy < 0) { o.vy = -o.vy; hit = true; } }
+      if (e !== 'B' && o.y >= maxY) { o.y = maxY; if (o.vy > 0) { o.vy = -o.vy; hit = true; } }
       if (hit) recolor(o);
       if (!o.solid && !o.entering) o.solid = !logos.some(function (p) { return p !== o && p.solid && contact(o, p); });
       place(o);
@@ -568,7 +695,7 @@
     } else if (k === 'r' || k === 'R') {
       var cur = screenRecolor === 'auto' ? 'auto' : screenRecolor.length === 1 ? screenRecolor[0] : 'auto';
       var next = RECOLOR_CYCLE[(RECOLOR_CYCLE.indexOf(cur) + 1) % RECOLOR_CYCLE.length];
-      tryScreen(screenFrames, next === 'auto' ? 'auto' : [next], 'recolour: ' + next);
+      tryScreen(screenFrames, next === 'auto' ? 'auto' : [next], 'recolor: ' + next);
     } else if (k === '0') {
       tryScreen(S.frame, S.recolor, 'as configured');
     } else if (k === 's' || k === 'S') {
@@ -589,7 +716,7 @@
     retarget();
     logos.forEach(function (o) {
       if (!o.entering) { o.x *= W / ow; o.y *= H / oh; }
-      var m = Math.sqrt(o.vx * o.vx + o.vy * o.vy) || 1, s = speedOf(o);
+      var m = Math.sqrt(o.vx * o.vx + o.vy * o.vy) || 1, s = o.sp = speedOf(o);
       o.vx *= s / m; o.vy *= s / m;
     });
   });
@@ -622,12 +749,17 @@
       shrink:   numOr(raw.shrink, 0, 2, +D.shrink),
       fill:     numOr(raw.fill, 0.02, 0.9, +D.fill),
       speed:    range(raw.speed, 0.05, 8) || range(D.speed, 0, 99),
+      speedCap: Infinity,
+      spin:     /^\s*(on|yes|true|1)\s*$/i.test(raw.spin) ? 'on' : /^\s*free\s*$/i.test(raw.spin) ? 'free' : null,
       gap:      numOr(raw.gap, 0, 600, +D.gap),
       collide:  bool(raw.collide),
       jump:     numOr(raw.jump, 0, 120, +D.jump),
       messages: bool(raw.messages)
     };
     if (!S.frame.length) S.frame = FRAMES.slice();
+    // speed-cap: off | on (= the top of the speed range) | a number (x normal speed)
+    if (/^\s*(on|yes|true)\s*$/i.test(raw['speed-cap'])) S.speedCap = S.speed[1];
+    else if (num(raw['speed-cap'], 0.05, 8) != null) S.speedCap = Math.max(num(raw['speed-cap'], 0.05, 8), 0.05);
     if (S.recolor !== 'auto' && !S.recolor.length) S.recolor = 'auto';
     screenFrames = S.frame; screenRecolor = S.recolor; target = S.count;
     document.body.style.background = raw.background;
